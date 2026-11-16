@@ -1,0 +1,11 @@
+.pio/
+node_modules/
+__pycache__/
+*.pyc
+
+src/config/LtePrivate.h
+relay/.env
+relay/secrets/
+relay/backups/
+relay/.relay-setup-*/
+relay/node_modules/
