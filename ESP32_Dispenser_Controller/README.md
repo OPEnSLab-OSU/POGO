@@ -1,0 +1,413 @@
+# Drone Gel Dispenser Controller
+
+The root [controller.cmd](../controller.cmd) provides setup, COM-port discovery,
+compile and flash commands. Flash asks you to confirm its detected port before
+writing; compile installs missing tools/packages and saves reusable binaries.
+See [CLI usage](../docs/CONTROLLER_CLI.md).
+
+For repeat uploads of an already-built binary, use the root
+[Flash Firmware.cmd](../Flash%20Firmware.cmd) launcher instead of Arduino Upload.
+See [flash without recompiling](../docs/FLASHING_PRECOMPILED.md). The binary keeps
+the board settings and features selected when it was built.
+
+The compact console places command prefill and live output beside grouped preset
+buttons on desktop, with a stacked phone layout. Presets prefill the editor; use
+Send to execute. The dispenser's arm/pulse/stop controls are first in its side
+panel. Follow can be turned off to read earlier output, and non-sensitive command
+drafts survive reloads. Temporary read failures back off and reconnect; a lost
+command acknowledgement remains explicit because the command may have executed.
+
+On phones, a fixed bottom bar keeps Console, Controls and Stop all reachable
+while scrolling. Save log downloads the displayed output as a text file.
+Find a preset filters buttons by name, group or command without executing them;
+Escape clears the search. Dispensing controls stay above the preset search.
+Output tracking follows displayed messages rather than queue acknowledgements.
+Local reconnects handle a previous-boot cursor; remote reconnects recover available
+cached output and report known history gaps.
+
+On the hosted LTE console, open Connection to see the browser link, broker report
+and controller state age. Check connection reads status without resending commands.
+After a new device connection, Send waits for its current state; Stop all can still
+reach a connected controller while that state is pending. Local consoles do not
+request the relay's diagnostics endpoint.
+
+This UI iteration was checked with source/browser tests. **No firmware compilation
+was run in this iteration.**
+
+The LOLIN32 keeps its existing local transport options. LTE firmware work targets
+the S3 variants because of the additional memory needed alongside Bluetooth.
+
+ESP32 firmware for a drone-mounted caulk-gel dispenser. The normal build uses
+GPIO26 to control an external analog switch connected to the applicator trigger.
+It provides a simple user-facing Arduino sketch while keeping the more
+advanced FreeRTOS, Wi-Fi, BLE, command, routine, logging, and OTA systems in
+separate modules.
+
+The optional stepper and DAC hardware from the original project is preserved as
+an advanced alternate build profile. It is compiled out of the normal aircraft
+firmware.
+
+## Start here
+
+For optional ESP32 LR-only Wi-Fi and a nearby Bluetooth ground relay, read the
+[LR setup and relay guide](../docs/WIFI_LR.md). Ordinary Wi-Fi remains the default.
+
+1. Read [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
+2. Confirm the external switch is held inactive while the ESP32 is reset.
+3. Open `ESP32_Dispenser_Controller.ino` in Arduino IDE.
+4. Open the neighboring `QuickConfig.h` tab and confirm the pinout.
+5. Install the maintained ESP32Async `AsyncTCP` and `ESPAsyncWebServer` libraries.
+6. Select the exact board and partition settings described below.
+7. Upload with the dispenser disconnected or unloaded for the first test.
+8. Open Serial Monitor at 115200 baud and send `Status`.
+
+The browser console is available from the default access point:
+
+```text
+SSID: Drone-Gel-Controller
+Password: password
+URL: http://192.168.4.1/
+```
+
+### Exact Arduino board settings
+
+- Board package: Espressif `esp32` core 3.3.10 or a compatible release.
+- Arduino board menu: `WEMOS LOLIN32`.
+- Fully qualified board name: `esp32:esp32:lolin32`.
+- MCU/target: classic ESP32 (`build.mcu=esp32`, `build.target=esp32`).
+- Flash: 4 MB, DIO mode.
+- Partition menu: `Minimal SPIFFS (Large APPS with OTA)`.
+- Partition identifier: `min_spiffs` (`PartitionScheme=min_spiffs`).
+- Layout: two 1,966,080-byte (`0x1E0000`) OTA application slots, 128 KiB
+  (`0x20000`) SPIFFS, plus NVS, OTA metadata, and coredump partitions.
+
+Equivalent Arduino CLI selection:
+
+```text
+--fqbn esp32:esp32:lolin32 --board-options PartitionScheme=min_spiffs
+```
+
+## Normal operating sequence
+
+```text
+DispenserStatus
+Arm
+Dispense:250
+Disarm
+```
+
+`Arm` does not activate GPIO26. It opens the active profile's temporary arming window during
+which a bounded dispense pulse may be requested. Every reset, `StopAll`, routine
+completion, fault, or arm timeout leaves the output inactive and disarmed.
+The requested pulse must fit entirely inside the remaining arm window; otherwise
+the controller asks for a fresh `Arm` instead of starting a truncated pulse.
+
+`GPIO26:ON` remains as a compatibility alias, but it is converted to the default
+bounded pulse instead of producing an indefinite HIGH state.
+
+## Hardware connection
+
+```text
+ESP32 GPIO26  -> external analog-switch enable/control input
+ESP32 GND     -> control-circuit ground
+```
+
+GPIO26 is only a 3.3 V logic control signal. It must not receive the switched
+caulk-gun signal and must not power the actuator.
+
+The external control circuit should provide a hardware inactive bias so the
+switch remains off before firmware starts, during reset, and if the ESP32 loses
+power. A separate physical or flight-controller interlock can be configured
+with `DRONE_CFG_INTERLOCK_PIN` in `QuickConfig.h`.
+
+## Safety state model
+
+```text
+DISARMED -> ARMED -> DISPENSING
+    ^          |          |
+    +----------+----------+
+       timeout / stop / fault
+```
+
+- The dispenser always starts `DISARMED`.
+- The default dispenser initializes its safe output immediately after USB serial,
+  before indicator animations, self-test recovery, or radio startup.
+- Arming is never written to NVS.
+- Pulse, initial delay, and gap use unsigned 32-bit milliseconds (up to
+  4294967295 ms, about 49.7 days per step). Repeats accept 1–4294967295.
+  There is no total routine runtime or WAIT_IDLE timeout cap.
+- Maximum pulse and automatic arming expiry default to disabled (0).
+- Saved dispenser settings and named profiles keep their own maximum pulse after
+  a firmware update. To remove limits in the active saved setup, use the console's
+  **Remove saved time limits**, or disarm and send `DispenserArmTimeout:0` and
+  `DispenserMaxPulse:0`, then
+  save with `DispenserSave` or `PayloadProfileSave:<active-name>` as appropriate.
+- A new dispense request is rejected while a pulse is already active, so
+  repeated commands cannot silently extend one activation.
+- Closing the optional interlock immediately stops and faults the dispenser.
+- Payload profiles never store or restore an armed, active, or faulted state.
+- Selecting, saving, or deleting a payload profile requires the dispenser to be
+  disarmed and is blocked while a routine owns the payload.
+- `StopAll` cancels routines, stops hardware, and disarms the dispenser.
+- Emergency stops enter a queue barrier that discards older pending commands;
+  hardware routing remains serialized on the control task.
+- A saved routine cannot contain `Arm`, configuration, radio, reboot, or erase commands.
+- While a routine is active, external commands cannot arm or start an
+  overlapping dispense pulse; status and stop commands remain available.
+- Routine completion and routine failure both make the addon safe.
+- Valid OTA uploads and managed radio reboots force a safe hardware state before
+  flash writing or restart.
+
+These are software safeguards. They do not replace an external inactive bias,
+an aircraft-level inhibit, suitable power isolation, or ground testing.
+
+## Saved payload profiles
+
+The normal aircraft build provides four fixed, checksummed payload-profile slots
+in ESP32 NVS. Each profile stores a GPIO, output polarity, default pulse,
+maximum pulse, and arm timeout. The optional interlock is global and cannot be
+weakened or disabled by a runtime profile.
+
+Create and select a fine-output setup:
+
+```text
+Disarm
+DispenserPin:26
+DispenserActiveHigh:ON
+DispenserDefaultPulse:150
+DispenserMaxPulse:750
+DispenserArmTimeout:30000
+PayloadProfileSave:fine
+```
+
+Create another setup the same way, then switch between them while disarmed:
+
+```text
+PayloadProfileList
+PayloadProfileUse:fine
+PayloadProfileShow:fine
+```
+
+`PayloadProfileSave` snapshots the current settings and selects that profile for
+future boots. Pulse and arming limits are optional; zero disables them.
+Profiles do not contain `Arm`, output state, or routines.
+
+## Saved timing routines
+
+Routines run without blocking `loop()` or the network task. They are fixed-size,
+checksummed records in ESP32 NVS and are only written by `RoutineSave`.
+
+In the interface, use **Add output** to configure up to eight analog-switch
+GPIOs with their own dispense time and delay after each pulse. Disarm and **Save
+output pins**, then **Build + save** the named routine. Outputs run one at a time
+in row order; each repeat cycles through all rows. **Use default single output**
+returns to one GPIO. Stop turns off every output. See the
+[multiple-output instructions](docs/COORDINATE_ROUTINES.md#multiple-analog-switch-outputs).
+
+Create a six-dot pattern:
+
+```text
+RoutineCreate:dots
+RoutineAdd:dots:DISPENSE:200
+RoutineAdd:dots:WAIT_IDLE
+RoutineAdd:dots:WAIT:800
+RoutineRepeat:dots:6
+RoutineSave:dots
+```
+
+The console's **Initial delay ms** waits once before the first pulse. Check
+**Repeat until stopped** to cycle the pulse and gap continuously after that
+delay. Both settings are saved with the named routine. Its Run button starts
+the saved settings; **Stop routine** stops the output and cancels further cycles.
+The command equivalent is `RoutineRepeat:dots:FOREVER` followed by `RoutineSave:dots`.
+
+Run it:
+
+```text
+Arm
+RoutineRun:dots
+```
+
+Stop it immediately:
+
+```text
+StopAll
+```
+
+`COMMAND:` steps allow the same routine engine to drive optional stepper or DAC
+hardware in the advanced profile. Only a small hardware-action allowlist is
+accepted; administrative commands cannot be stored in routines.
+
+## User settings
+
+`QuickConfig.h` sits directly beside the `.ino` and appears as another Arduino
+IDE tab. It contains the settings users are expected to change:
+
+```cpp
+#define DRONE_CFG_HARDWARE_PROFILE 1
+#define DRONE_CFG_DISPENSER_PIN 26
+#define DRONE_CFG_DISPENSER_ACTIVE_HIGH 1
+#define DRONE_CFG_DISPENSER_DEFAULT_PULSE_MS 250UL
+#define DRONE_CFG_DISPENSER_MAX_PULSE_MS 0UL
+#define DRONE_CFG_DISPENSER_ARM_TIMEOUT_MS 0UL
+#define DRONE_CFG_INTERLOCK_PIN -1
+```
+
+See [saved routines and drone position](docs/COORDINATE_ROUTINES.md) for the
+initial-delay controls, Wi-Fi client setup, ordered coordinates, MAVLink input over Wi-Fi or Bluetooth,
+and the position API an XAG integration provider can connect to.
+
+The same tab groups the status LED pins, local access-point identity, and the
+advanced stepper/DAC pinout. Set `DRONE_USE_QUICK_CONFIG` to `0` to ignore all
+of those overrides and use the safe fallbacks in `src/config/AppConfig.h`.
+Incorrect timing ranges, invalid output pins, and pin collisions produce a
+clear compiler error. Feature switches, queue sizes, and expert-only limits stay
+in `AppConfig.h` so the beginner tab remains short.
+
+Quick settings are compiled defaults. A standalone configuration saved with
+`DispenserSave`, or a named selection made with `PayloadProfileSave`/`Use`, wins
+at boot. Send `DispenserErase` and reboot when you want the compiled defaults to
+take over; named records remain available until individually deleted or erased
+with `PayloadProfileEraseAll`.
+
+Runtime pin changes are deliberately conservative:
+
+```text
+Disarm
+DispenserPin:32
+DispenserActiveHigh:ON
+DispenserDefaultPulse:200
+PayloadProfileSave:alternate
+```
+
+The controller rejects flash pins, input-only pins, common boot-strapping pins,
+the configured interlock, and pins already owned by status indicators or the
+optional auxiliary UART. Rewire and test the new pin with the applicator unloaded.
+
+## Build profiles
+
+### Default aircraft profile
+
+```cpp
+#define DRONE_CFG_HARDWARE_PROFILE 1
+```
+
+Owns the configured dispenser output. Stepper and DAC implementation files are
+compiled to empty translation units and consume no runtime tasks or GPIOs.
+
+### Advanced bench profile
+
+```cpp
+#define DRONE_CFG_HARDWARE_PROFILE 2
+```
+
+Restores the original 28BYJ-48 stepper, GPIO25 DAC, and GPIO26 compatibility
+output package. The two profiles are mutually exclusive because both may own
+GPIO26. Stepper and DAC boot tests remain disabled unless explicitly enabled in
+`AppConfig.h`.
+
+## Source map
+
+```text
+ESP32_Dispenser_Controller.ino           Small Arduino entrypoint
+QuickConfig.h                           Beginner hardware and network defaults
+src/config/AppConfig.h                  Advanced limits and build flags
+src/addons/dispenser/DispenserAddon.*  Arming, pulse, interlock, safe GPIO config
+src/core/RoutineEngine.*                Saved nonblocking routines
+src/core/CommandDispatcher.*            Bounded shared command queue
+src/core/CommandRouter.*                Global command routing and state JSON
+src/radio/RadioManager.*                Wi-Fi/BLE profiles and rollback
+src/web/WebPortal.*                     HTTP API, portal, and OTA
+web/                                    Editable browser UI sources
+src/addons/stepper_dac/                 Optional advanced hardware profile
+COMMANDS.md                             Complete command reference
+docs/USER_GUIDE.md                      Guided first setup
+```
+
+The `.ino` intentionally stays small. Users can follow normal Arduino
+`setup()` and `loop()` while each sophisticated subsystem remains independently
+testable and replaceable.
+
+## Web console
+
+The hosted page provides:
+
+- prominent armed/disarmed/dispensing state;
+- active named payload-profile status and profile command examples;
+- fixed and custom bounded pulse buttons;
+- a simple dot-pattern routine builder;
+- routine, queue, radio, heap, and self-test status;
+- an advanced text console using the same commands as USB and BLE;
+- firmware OTA over Wi-Fi.
+
+The editable files are `web/index.html`, `web/app.css`, and `web/app.js`. Their
+gzip representation served by the ESP32 is stored in `src/web/WebAssets.h`.
+`web/standalone_console.html` is a generated, self-contained copy for opening
+from a laptop and targeting a controller URL; it is not embedded in firmware.
+
+After changing any frontend source, rebuild both generated files with Node.js:
+
+```text
+npm ci
+node web/build_web_assets.mjs
+```
+
+The script uses the pinned Terser build dependency to compact the embedded
+JavaScript and produces deterministic gzip bytes. The standalone console keeps
+readable JavaScript. Arduino builds use the checked-in generated assets; npm is
+needed only when regenerating them. To check for stale generated files, run:
+
+```text
+node web/build_web_assets.mjs --check
+```
+
+## Recommended ground-test checklist
+
+1. Disconnect or unload the caulk gun.
+2. Power-cycle and verify the switch input remains inactive throughout boot.
+3. Confirm `DispenserStatus` reports `DISARMED`.
+4. Confirm `Dispense:250` is rejected while disarmed.
+5. Arm and measure a 250 ms control pulse.
+6. Confirm `DispenseStop`, `Disarm`, and `StopAll` immediately make the pin inactive.
+7. Let the arm window expire and confirm dispensing is rejected.
+8. Run a short saved routine and interrupt it with `StopAll`.
+9. If an interlock is fitted, open it during a pulse and verify a fault shutdown.
+10. Repeat with final aircraft power, wiring, radio traffic, and payload hardware.
+
+## Notes
+
+- The project assumes a classic ESP32 because the optional DAC profile uses its
+  native GPIO25 DAC implementation.
+- GPIO5 is used by the optional activity indicator and is a boot-strapping pin;
+  review the final LED circuit.
+- Wi-Fi and BLE controls are intended for a trusted local test network in the
+  current phase.
+- Use `StopAll` as the universal software-safe command. Maintain an independent
+  hardware inhibit for actual flight operations.
+
+## Optional Adafruit DRV8871 brushed DC motors
+
+Set `DRONE_CFG_ENABLE_DRV8871` to `1` in `QuickConfig.h`. Default wiring is
+**GPIO32 → IN1 and GPIO33 → IN2**. Join controller GND, driver GND and motor-supply
+negative. Connect the motor across OUT1/OUT2 and a separate motor-rated supply
+to VM/GND within the breakout's 6.5–45 V range. The level is 8-bit PWM duty
+cycle. The breakout's ILIM resistor sets the hardware current limit.
+Configure one to four IN1/IN2 pairs in `DRONE_CFG_DRV8871_MOTOR_PINS`. Each
+motor uses its own breakout and two GPIOs. Pin pairs are numbered in list order
+starting at 1. Keep that order when rebuilding to preserve saved motor targets.
+The console shows motor selectors when more than one pair is configured.
+[Adafruit wiring guide](https://learn.adafruit.com/adafruit-drv8871-brushed-dc-motor-driver-breakout/pinouts)
+
+Arm the dispenser, select a drive level, and press **Start** or **Pulse** in
+the DRV8871 panel next to the GPIO pulse controls. While driving, releasing the
+slider applies the new level without extending the run. **Stop (brake)** brakes
+a running motor. **Coast**, timer expiry, Disarm, interlock closure and Stop All
+release the motor. GPIO and motor pulses share the dispenser's single active
+output slot. The motor cap defaults to 30 seconds and is configurable via
+`DRONE_CFG_DRV8871_MAX_RUN_MS`. A shorter payload pulse limit or remaining
+arm window still applies. In the routine builder, choose **DRV8871 repeated
+pulses** for an on/off cycle or **DRV8871 steady run** for a single bounded run.
+Build + save stores the drive level with the timing. A positive off period
+allows repeat-until-stopped operation when the arm window is unlimited.
+Arm before running the saved routine. Stop Routine cancels future pulses and
+releases the motor. The S3 hosted console uses the same builder.
