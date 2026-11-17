@@ -151,8 +151,10 @@ Commenting out `APP_ENABLE_STATUS_INDICATORS` removes LED GPIO and RGB-driver ac
 
 | Visible color | Meaning |
 |---|---|
-| Green | Connected; blinks while seeking a connection |
-| Blue | Command/activity pulse; takes priority over green |
+| Green | Connected and idle |
+| Yellow | Blinks while seeking a connection |
+| Blue | Received command |
+| Magenta | Transmitted reply/output |
 | Amber | An addon reports active work or commands remain queued |
 | Off | No connection or activity |
 
@@ -773,3 +775,38 @@ That is expected in this base build. The custom stepper/DAC implementation and i
 
 Home laptop hosting: [guided Docker setup and port forwarding](../docs/HOME_HOSTING.md).
 S3 LTE builds also support [secure Wi-Fi MQTT fallback](docs/LTE_FIELD_ACCESS.md#wi-fi-fallback-when-lte-fails); local Wi-Fi stays available independently.
+
+## S3 NeoPixel traffic indication
+
+The firmware-controlled NeoPixel shows blue for received commands, magenta for
+transmitted replies/output, green for an idle connection, blinking yellow while
+seeking a connection, and amber during active output. RX/TX flashes take
+precedence over active output and alternate when both are pending. Automatic
+state polling and internal routine steps do not generate command-traffic colors.
+The fixed power and USB bridge LEDs are driven by the board hardware.
+
+Use `IndicatorStatus` for the configured RGB pin and color legend. If the
+NeoPixel stays dark, send `IndicatorRGBPin:38` followed by `IndicatorTest`.
+Use `IndicatorRGBPin:48` to test the original pin. Pin selection lasts until
+reset. Set `APP_STATUS_RGB_PIN` to the working pin for the next build.
+Espressif's initial board uses GPIO48, while v1.1 uses GPIO38.
+[Espressif board revisions](https://documentation.espressif.com/esp-dev-kits/en/latest/esp32s3/esp32-s3-devkitc-1/user_guide_v1.1.html)
+
+## Browser heartbeat range test
+
+Enable **Heartbeat · every 2 s** under the command editor. This browser sends
+one fresh `Heartbeat:<token>` command every two seconds when idle. The controller
+pulses its NeoPixel white on the S3, or its activity LED on the classic ESP32,
+and echoes `HEARTBEAT <token>`. The browser shows matching device replies, missed
+attempts and round-trip time, including output-stream/poll latency.
+A queue acknowledgement alone does not count as a device reply.
+
+The toggle starts off on each page load. Keep the tab visible during the test.
+It pauses while hidden, during OTA or while other browser controls are busy,
+and resumes fresh attempts when ready. Only one heartbeat is outstanding.
+Heartbeat HTTP sends use one attempt, so an outage does not build a retry queue.
+Turn the toggle off or close the page to stop future sends. Pulses depend on
+received browser commands rather than a free-running device timer.
+
+Manual commands `Heartbeat` and `Heartbeat:range1` also produce a pulse and
+reply. No arming is required, and heartbeat does not activate the payload.

@@ -259,3 +259,22 @@ OTA is driven from the browser console rather than a text command.
 ```
 
 The browser can begin from BLE, but the binary stream always transfers over Wi-Fi.
+
+## S3 NeoPixel diagnostics
+
+- `IndicatorStatus` prints the RGB pin and RX/TX color legend.
+- `IndicatorRGBPin:38` or `IndicatorRGBPin:48` selects the NeoPixel data pin
+  for this boot. Set `APP_STATUS_RGB_PIN` to preserve it in a future build.
+- `IndicatorTest` tests green and blue on the selected pin.
+
+Received commands flash blue, transmitted replies/output flash magenta,
+idle connection is green, seeking blinks yellow, and active output is amber.
+
+## Browser heartbeat
+
+`Heartbeat` pulses the status/activity LED for 250 ms.
+`Heartbeat:<token>` also returns `HEARTBEAT <token>` for a round-trip check.
+Tokens can contain up to 24 letters, digits, hyphens or underscores.
+On S3 builds the heartbeat is white. On classic boards the activity LED pulses.
+Enable the browser's **Heartbeat · every 2 s** toggle for repeated range tests.
+Keep the tab visible. The timer belongs to that browser page.
